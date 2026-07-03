@@ -133,7 +133,7 @@ function VencordSettings() {
                     <QuickAction
                         Icon={GithubIcon}
                         text="View DigiCord Source Code"
-                        action={() => VencordNative.native.openExternal("https://github.com/")}
+                        action={() => VencordNative.native.openExternal("github.com/3l3euwu/Vencord")}
                     />
                     <QuickAction
                         Icon={LogIcon}
