@@ -88,8 +88,16 @@ function Kill-Discord {
 
 function Write-Shim($appDir) {
     Set-Content -Path "$appDir\package.json" -Value '{"name":"discord","main":"index.js"}'
-    $patcherPath = (Join-Path $DistPath "patcher.js") -replace "\\","/"
-    Set-Content -Path "$appDir\index.js" -Value "require('$patcherPath');`n"
+
+    $targetDist = Join-Path $appDir "dist"
+    if (-not (Test-Path $targetDist)) { New-Item -Path $targetDist -ItemType Directory -Force | Out-Null }
+    if (Test-Path $DistPath) {
+        Get-ChildItem -LiteralPath $DistPath -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $targetDist $_.Name) -Force
+        }
+    }
+
+    Set-Content -Path "$appDir\index.js" -Value "require('./dist/patcher.js');`n"
 }
 
 function Install-DigiCord($targetPath) {

@@ -87,9 +87,20 @@ function isFile(p) {
 
 function writeShim(appDir) {
     writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "discord", main: "index.js" }));
-    writeFileSync(join(appDir, "index.js"),
-        `require(${JSON.stringify(join(DIST, "patcher.js"))});\n`
-    );
+
+    const targetDist = join(appDir, "dist");
+    if (!existsSync(targetDist)) mkdirSync(targetDist);
+    if (existsSync(DIST)) {
+        for (const f of readdirSync(DIST)) {
+            const src = join(DIST, f);
+            const dst = join(targetDist, f);
+            if (statSync(src).isFile()) {
+                writeFileSync(dst, readFileSync(src));
+            }
+        }
+    }
+
+    writeFileSync(join(appDir, "index.js"), "require('./dist/patcher.js');\n");
 }
 
 // ── Install DigiCord into a Discord path ──────────────────────────────
