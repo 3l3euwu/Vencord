@@ -201,42 +201,66 @@ DigiCord.registerPlugin({
             return;
         }
 
+        // Match both <:name:id> and :shortcode: patterns
+        const emojiPattern = /<a?:(\w+):(\d+)>|:([a-zA-Z0-9_]+):/g;
+
         const listener = (channelId, messageObj, options) => {
             if (!this.store.emojiBypass) return;
 
-            const emojis = messageObj.validNonShortcutEmojis;
-            if (!emojis || emojis.length === 0) return;
+            const content = messageObj.content;
+            if (!content) return;
 
-            let modified = false;
+            let newContent = content;
+            let match;
 
-            for (const emoji of emojis) {
+            // Reset regex
+            emojiPattern.lastIndex = 0;
+
+            while ((match = emojiPattern.exec(content)) !== null) {
                 try {
-                    // Check if user can already use this emoji (from current server or has Nitro)
-                    const canUse = this.canUseEmoji(emoji, channelId);
-                    if (canUse) continue;
+                    const fullMatch = match[0];
+                    const isTag = fullMatch.startsWith("<");
+                    let emoji, emojiId, emojiName, isAnimated;
 
-                    // Build the emoji string Discord expects: <:name:id> or <a:name:id>
-                    const emojiString = `<${emoji.animated ? "a" : ""}:${emoji.originalName || emoji.name}:${emoji.id}>`;
+                    if (isTag) {
+                        // <:name:id> or <a:name:id> format
+                        emojiName = match[1];
+                        emojiId = match[2];
+                        isAnimated = fullMatch.startsWith("<a:");
+
+                        // Look up by ID
+                        emoji = EmojiStore.getCustomEmojiById?.(emojiId);
+                        if (!emoji) continue;
+                    } else {
+                        // :shortcode: format
+                        const shortcode = match[3];
+
+                        // Search all custom emojis for a match by name
+                        emoji = this.findEmojiByName(shortcode);
+                        if (!emoji || !emoji.id) continue;
+
+                        emojiId = emoji.id;
+                        emojiName = emoji.name;
+                        isAnimated = emoji.animated;
+                    }
+
+                    // Check if user can use this emoji
+                    if (this.canUseEmoji(emoji, channelId)) continue;
+
                     const size = this.store.emojiSize || 48;
+                    const ext = isAnimated ? "gif" : "png";
+                    const url = `https://cdn.discordapp.com/emojis/${emojiId}.${ext}?size=${size}`;
 
-                    // Build the CDN URL
-                    const ext = emoji.animated ? "gif" : "png";
-                    const url = `https://cdn.discordapp.com/emojis/${emoji.id}.${ext}?size=${size}`;
+                    // Replace with hyperlink
+                    newContent = newContent.replace(fullMatch, `[${emojiName}](${url})`);
 
-                    // Replace the emoji string with a hyperlink: [name](url)
-                    messageObj.content = messageObj.content.replace(
-                        emojiString,
-                        `[${emoji.name}](${url})`
-                    );
-
-                    modified = true;
                 } catch (e) {
                     // Skip this emoji if processing fails
                 }
             }
 
-            if (modified) {
-                // Return cancel: false so the message still sends
+            if (newContent !== content) {
+                messageObj.content = newContent;
             }
         };
 
@@ -246,29 +270,86 @@ DigiCord.registerPlugin({
         this.logger.info("Emoji bypass active");
     },
 
-    canUseEmoji(emoji, channelId) {
-        // If no guild_id, it's a standard emoji - always usable
-        if (!emoji.guildId) return true;
-
-        const currentGuildId = DigiCord.getCurrentGuildId?.();
-        if (emoji.guildId === currentGuildId) return true;
-
-        // Check if user has USE_EXTERNAL_EMOJIS permission
+    findEmojiByName(name) {
         try {
-            const PermissionStore = DigiCord.Stores?.PermissionStore;
-            const ChannelStore = DigiCord.Stores?.ChannelStore;
-            if (!PermissionStore || !ChannelStore) return false;
+            const EmojiStore = DigiCord.Stores?.EmojiStore;
+            if (!EmojiStore) return null;
 
-            const channel = ChannelStore.getChannel(channelId);
+            // Try getEmoji if available (returns all custom emojis)
+            if (typeof EmojiStore.getEmoji === "function") {
+                const emojis = EmojiStore.getEmoji();
+                if (Array.isArray(emojis)) {
+                    const found = emojis.find(e =>
+                        e.name?.toLowerCase() === name.toLowerCase() ||
+                        e.name?.replace(/\s/g, "_").toLowerCase() === name.toLowerCase()
+                    );
+                    if (found) return found;
+                }
+            }
+
+            // Try forEachEmoji or similar iteration
+            if (typeof EmojiStore.forEach === "function") {
+                let found = null;
+                EmojiStore.forEach((e) => {
+                    if (found) return;
+                    if (e.name?.toLowerCase() === name.toLowerCase()) {
+                        found = e;
+                    }
+                });
+                if (found) return found;
+            }
+
+            // Try getEmojiCategories and search through them
+            if (typeof EmojiStore.getEmojiCategories === "function") {
+                const categories = EmojiStore.getEmojiCategories();
+                for (const cat of categories) {
+                    const emojis = cat.emojis ?? [];
+                    const found = emojis.find(e =>
+                        e.name?.toLowerCase() === name.toLowerCase()
+                    );
+                    if (found) return found;
+                }
+            }
+
+            // Brute force: check all known emoji IDs (unreliable but fallback)
+            return null;
+        } catch (e) {
+            return null;
+        }
+    },
+
+    canUseEmoji(emoji, channelId) {
+        if (!emoji) return true;
+
+        // Get the guild ID from various possible properties
+        const emojiGuildId = emoji.guildId ?? emoji.guild_id ?? null;
+
+        // If no guild, it's a standard unicode emoji - always usable
+        if (!emojiGuildId) return true;
+
+        // If from the current server, always usable
+        const currentGuildId = DigiCord.getCurrentGuildId?.();
+        if (emojiGuildId === currentGuildId) return true;
+
+        // DMs and group DMs - check USE_EXTERNAL_EMOJIS or allow
+        const ChannelStore = DigiCord.Stores?.ChannelStore;
+        const PermissionStore = DigiCord.Stores?.PermissionStore;
+
+        try {
+            const channel = ChannelStore?.getChannel?.(channelId);
             if (!channel) return false;
 
-            // Private channels - always allowed
-            if (channel.type === 1) return true;
+            // Private channels (DM = 1, GROUP_DM = 3) - always allowed
+            if (channel.type === 1 || channel.type === 3) return true;
 
-            // Permission bit for USE_EXTERNAL_EMOJIS = 1n << 18n = 262144n
-            return PermissionStore.can(262144n, channel);
+            // USE_EXTERNAL_EMOJIS = 1n << 18n = 262144n
+            if (PermissionStore?.can) {
+                return PermissionStore.can(262144n, channel);
+            }
         } catch (e) {
-            return false;
+            this.logger.error("Permission check failed", e);
         }
+
+        return false;
     },
 });
